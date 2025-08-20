@@ -29,4 +29,7 @@ pub enum ContractError {
 
     #[error("Deposit below minimum required amount")]
     DepositBelowMinimum {},
+
+    #[error("Past lockup period")]
+    PastLockupPeriod {},
 }

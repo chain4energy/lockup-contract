@@ -94,33 +94,64 @@ pub fn execute_lock(
         });
     }
 
-    let principal_amount = info.funds[0].clone();
+    let mut principal_amount = info.funds[0].clone();
     if principal_amount.amount.is_zero() {
         return Err(ContractError::ZeroAmount {});
     }
 
-    // check if the user already has a lockup (will allow to extend the lockup later)
-    if LOCKUPS.has(deps.storage, info.sender.clone()) {
-        return Err(ContractError::AlreadyLocked {});
+    // check if the lockup time has passed
+    if env.block.time.seconds() < duration {
+        return Err(ContractError::PastLockupPeriod {});
     }
 
-    // check if the deposit is above the limit (1 million c4e)
-    if principal_amount.amount > TIER_4_LIMIT {
-        return Err(ContractError::DepositExceedsLimit {});
-    }
     // check if the deposit is below the limit (10K C4E)
     if principal_amount.amount < TIER_1_MIN {
         return Err(ContractError::DepositBelowMinimum {});
     }
 
-    let apr = get_apr_for_amount(principal_amount.amount);
+    let mut apr = TIER_1_APR;   // default value
+
+    // check if the deposit is above the limit (1 million c4e)
+    if principal_amount.amount > TIER_4_LIMIT {
+        return Err(ContractError::DepositExceedsLimit {});
+    }
+
+    // check if the user already has a lockup (for the tier upgrade system)
+    let (unlock_time, preserve_last_claim_time) = if LOCKUPS.has(deps.storage, info.sender.clone()) {
+        // load existing lockup, and check current tier
+        let existing_lockup = LOCKUPS.load(deps.storage, info.sender.clone())?;
+        let existing_tier = get_tier_for_amount(existing_lockup.principal_amount.amount);
+
+        // check if the new deposit is above the limit
+        if principal_amount.amount + existing_lockup.principal_amount.amount > TIER_4_LIMIT {
+            return Err(ContractError::DepositExceedsLimit {});
+        }
+        // check if the new apr applies
+        if get_tier_for_amount(existing_lockup.principal_amount.amount + principal_amount.amount) > existing_tier {
+            // set new apr
+            apr = get_apr_for_amount(existing_lockup.principal_amount.amount + principal_amount.amount);
+        } else {
+            // dont update apr
+            apr = get_apr_for_amount(principal_amount.amount);
+        }
+        // update the lockup balance
+        principal_amount.amount += existing_lockup.principal_amount.amount;
+
+        // calculate remaining time: keep the original unlock time, dont reset to full duration
+        (existing_lockup.unlock_time, existing_lockup.last_claim_time)
+    } else {
+        // continue lockup normally
+        apr = get_apr_for_amount(principal_amount.amount);
+        // new lockup gets full duration from current time
+        (env.block.time.plus_seconds(duration), env.block.time)
+    };
 
     let lockup = Lockup {
         owner: info.sender.clone(),
         principal_amount: principal_amount.clone(),
-        unlock_time: env.block.time.plus_seconds(duration),
+        unlock_time,
         annual_percentage_rate: apr,
-        last_claim_time: env.block.time,
+        last_claim_time: preserve_last_claim_time,
     };
     LOCKUPS.save(deps.storage, info.sender.clone(), &lockup)?;
 
@@ -259,6 +290,19 @@ fn get_apr_for_amount(amount: Uint128) -> Decimal {
     }
 }
 
+fn get_tier_for_amount(amount: Uint128) -> u8 {
+    if amount >= TIER_4_MIN {
+        4
+    } else if amount >= TIER_3_MIN {
+        3
+    } else if amount >= TIER_2_MIN {
+        2
+    } else if amount >= TIER_1_MIN {
+        1
+    } else {
+        0
+    }
+}
 
 fn calculate_rewards(
     lockup: &Lockup,

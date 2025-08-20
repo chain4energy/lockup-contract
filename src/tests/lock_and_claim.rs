@@ -321,7 +321,7 @@ fn test_deposit_with_lockup() {
     ).unwrap();
 
     // 2. user locks funds for 1 year
-    let lock_amount = 500_000 * C4E_1;
+    let lock_amount = 100_000 * C4E_1;
     let lock_duration = 31_536_000; // 1 year in seconds
     app.execute_contract(
         user_addr.clone(),
@@ -330,16 +330,18 @@ fn test_deposit_with_lockup() {
         &[coin(lock_amount, DENOM)],
     ).unwrap();
 
-    let lock_amount2 = 100_000 * C4E_1;
+    let lock_amount2 = 400_000 * C4E_1;
 
     // 3. verify lockup details
     let lockup: Lockup = app.wrap().query_wasm_smart(
         contract_addr.clone(),
         &QueryMsg::GetLockup { address: user_addr.to_string() }
     ).unwrap();
+    println!("APR: {}", lockup.annual_percentage_rate);
     assert_eq!(lockup.principal_amount.amount, Uint128::new(lock_amount));
-    assert_eq!(lockup.annual_percentage_rate, Decimal::percent(PERCENTAGE as u64));
+    assert_eq!(lockup.annual_percentage_rate, Decimal::percent(5 as u64));
 
+    /*
     // 4. user tries to lock more funds
     // should return an error "Account already has an active lockup"
     let result = app.execute_contract(
@@ -355,6 +357,113 @@ fn test_deposit_with_lockup() {
         "Unexpected error message: {}",
         err_msg
     );
+    */
+
+    // advance time by half a year
+    app.update_block(|block| {
+        block.time = block.time.plus_seconds(31_536_000 / 2);
+    });
+
+    // 4. user claims rewards
+    // the reward should be at 5% APR
+    let rewards: Coin = app.wrap().query_wasm_smart(
+        contract_addr.clone(),
+        &QueryMsg::GetClaimableRewards { address: user_addr.to_string() }
+    ).unwrap();
+
+    let expected_rewards = lock_amount * 5 / 100 / 2;
+    // should be 2.5% of 100 000 C4E = 2500
+    println!("Claimable rewards (half a year): {}", rewards.amount);
+    println!("Expected rewards (half a year) : {}", expected_rewards);
+    assert_eq!(rewards.amount, Uint128::new(expected_rewards));
+
+    // 5. user claims rewards
+    app.execute_contract(
+        user_addr.clone(),
+        contract_addr.clone(),
+        &ExecuteMsg::ClaimRewards {},
+        &[],
+    ).unwrap();
+
+    // 6. verify user balance increased
+    let user_balance = app.wrap().query_balance(&user_addr, DENOM).unwrap();
+    // balance = initial - lock + rewards_claimed
+    let expected_balance = 1_000_000_000_000_000 - lock_amount + expected_rewards;
+    assert_eq!(user_balance.amount, Uint128::new(expected_balance));
+
+    // 7. user tries to lock more funds
+    app.execute_contract(
+        user_addr.clone(),
+        contract_addr.clone(),
+        &ExecuteMsg::Lock { duration: lock_duration },
+        &[coin(lock_amount2, DENOM)],
+    ).unwrap();
+
+    println!("User locked original amount: {}", lock_amount);
+    println!("User locked additional amount: {}", lock_amount2);
+    let expected_total_lock_amount = lock_amount + lock_amount2;
+
+    // 8. verify lockup details
+    let lockup: Lockup = app.wrap().query_wasm_smart(
+        contract_addr.clone(),
+        &QueryMsg::GetLockup { address: user_addr.to_string() }
+    ).unwrap();
+
+    println!("Final APR: {}", lockup.annual_percentage_rate);
+
+    assert_eq!(lockup.principal_amount.amount, Uint128::new(expected_total_lock_amount));
+    assert_eq!(lockup.annual_percentage_rate, Decimal::percent(8 as u64));
+
+    // 9. advance block time until the end of the lockup
+    app.update_block(|block| {
+        block.time = block.time.plus_seconds(31_536_000 / 2 + 1);
+    });
+
+    // 10. check claimable balance
+    // the reward should be at 8% APR
+    // should be 4% of 500 000 C4E = 20 000 C4E
+    let rewards: Coin = app.wrap().query_wasm_smart(
+        contract_addr.clone(),
+        &QueryMsg::GetClaimableRewards { address: user_addr.to_string() }
+    ).unwrap();
+
+    let expected_rewards = expected_total_lock_amount * 8 / 100 / 2;
+
+    println!("Claimable rewards: {}", rewards.amount);
+    println!("Expected rewards: {}", expected_rewards);
+    assert_eq!(rewards.amount, Uint128::new(expected_rewards));
+
+    // 11. user claims rewards
+    app.execute_contract(
+        user_addr.clone(),
+        contract_addr.clone(),
+        &ExecuteMsg::ClaimRewards {},
+        &[],
+    ).unwrap();
+
+    // calculate expected rewards from the entire lockup
+    // First half: 100k at 5% for 6 months = 2.5k (already claimed)
+    // Second half: 500k total at 8% for 6 months = 20k
+    let final_expected_rewards = lock_amount * 5 / 100 / 2 + expected_total_lock_amount * 8 / 100 / 2;
+
+    // 12. unlock principal
+    app.execute_contract(
+        user_addr.clone(),
+        contract_addr.clone(),
+        &ExecuteMsg::UnlockPrincipal {},
+        &[],
+    ).unwrap();
+
+    // 13. verify final balance
+    // should be the original amount plus locked amount plus all rewards = 1 000 000 000 + 2 500 + 20 000 = 1 000 022 500
+    let final_user_balance = app.wrap().query_balance(&user_addr, DENOM).unwrap();
+
+    let expected_final_balance = 1_000_000_000_000_000 + final_expected_rewards;
+
+    println!("Final user balance: {}", final_user_balance.amount);
+    println!("Expected final balance: {}", expected_final_balance);
+
+    assert_eq!(final_user_balance.amount, Uint128::new(expected_final_balance));
 
 }
 

@@ -12,9 +12,6 @@ pub enum ContractError {
     #[error("Funds are still locked. Unlock time: {unlock_time}")]
     StillLocked { unlock_time: Timestamp },
 
-    #[error("Account already has an active lockup")]
-    AlreadyLocked {},
-
     #[error("Must send funds with the expected denomination: {expected_denom}")]
     InvalidFunds { expected_denom: String },
 

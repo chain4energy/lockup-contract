@@ -1,6 +1,5 @@
 use cosmwasm_std::{
-    entry_point, to_json_binary, BankMsg, Binary, Coin,
-    Decimal, Deps, DepsMut, Env, MessageInfo,
+    entry_point, to_json_binary, BankMsg, Binary, Coin, Decimal, Deps, DepsMut, Env, MessageInfo,
     Response, StdError, StdResult, Uint128,
 };
 
@@ -8,35 +7,10 @@ use cw2::set_contract_version;
 
 use crate::error::ContractError;
 use crate::msg::{ExecuteMsg, InstantiateMsg, QueryMsg};
-use crate::state::{Config, Lockup, CONFIG, LOCKUPS};
+use crate::state::{Config, Lockup, TierConfig, CONFIG, LOCKUPS};
 
-const CONTRACT_NAME: &str = "crates.io:lockup-contract";
+const CONTRACT_NAME:    &str = "crates.io:lockup-contract";
 const CONTRACT_VERSION: &str = env!("CARGO_PKG_VERSION");
-
-// using 6 decimal places for C4E token (uc4e)
-const C4E_1: u128 = 1_000_000;
-
-// Tier thresholds in uc4e
-const TIER_1_MIN: Uint128 = Uint128::new(10_000 * C4E_1);
-const TIER_2_MIN: Uint128 = Uint128::new(50_000 * C4E_1);
-const TIER_3_MIN: Uint128 = Uint128::new(100_000 * C4E_1);
-const TIER_4_MIN: Uint128 = Uint128::new(500_000 * C4E_1);
-//
-
-// define lockup limit:
-const TIER_4_LIMIT: Uint128 = Uint128::new(1_000_000 * C4E_1); // 1 million C4E
-//
-
-// Annual Percentage Rates (APR) for each tier
-const TIER_1_APR: Decimal = Decimal::percent(2); // 2%
-// it doesnt work here (its in 'get_apr_for_amount'):
-//const TIER_2_APR: Decimal = Decimal::from_atomics(35u32, 3).unwrap(); // 3.5%
-const TIER_3_APR: Decimal = Decimal::percent(5); // 5%
-const TIER_4_APR: Decimal = Decimal::percent(8); // 8%
-//
-
-// this one in 'calculate_rewards'
-//const SECONDS_PER_YEAR: Decimal = Decimal::from_atomics(31_536_000_u128, 0).unwrap(); // 365 * 24 * 60 * 60
 
 #[cfg_attr(not(feature = "library"), entry_point)]
 pub fn instantiate(
@@ -49,13 +23,16 @@ pub fn instantiate(
 
     // use message sender as admin if not specified,
     // otherwise validate the provided address
-    let admin = msg
-        .admin
-        .map_or(Ok(info.sender.clone()), |addr| deps.api.addr_validate(&addr))?;
+    let admin = msg.admin.map_or(Ok(info.sender.clone()), |addr| {
+        deps.api.addr_validate(&addr)
+    })?;
 
+    // configurable lockup time, tier levels and rewards
     let config = Config {
         admin,
         denom: msg.denom,
+        lockup_duration_seconds: msg.lockup_duration_seconds,
+        tier_config: msg.tier_config,
     };
     CONFIG.save(deps.storage, &config)?;
 
@@ -73,20 +50,16 @@ pub fn execute(
     msg: ExecuteMsg,
 ) -> Result<Response, ContractError> {
     match msg {
-        ExecuteMsg::Lock { duration }  => execute_lock(deps, env, info, duration),
-        ExecuteMsg::UnlockPrincipal {} => execute_unlock_principal(deps, env, info),
-        ExecuteMsg::ClaimRewards {}    => execute_claim_rewards(deps, env, info),
-        ExecuteMsg::DepositRewards {}  => execute_deposit_rewards(deps, info),
+        ExecuteMsg::Lock {}             => execute_lock(deps, env, info),
+        ExecuteMsg::UnlockPrincipal {}  => execute_unlock_principal(deps, env, info),
+        ExecuteMsg::ClaimRewards {}     => execute_claim_rewards(deps, env, info),
+        ExecuteMsg::DepositRewards {}   => execute_deposit_rewards(deps, info),
     }
 }
 
-pub fn execute_lock(
-    deps: DepsMut,
-    env: Env,
-    info: MessageInfo,
-    duration: u64,
-) -> Result<Response, ContractError> {
+pub fn execute_lock(deps: DepsMut, env: Env, info: MessageInfo) -> Result<Response, ContractError> {
     let config = CONFIG.load(deps.storage)?;
+
     // expect only one type of coin to be sent
     if info.funds.len() != 1 || info.funds[0].denom != config.denom {
         return Err(ContractError::InvalidFunds {
@@ -94,57 +67,77 @@ pub fn execute_lock(
         });
     }
 
+    // validate principal amount
+    // check if the amount is not zero just in case
     let mut principal_amount = info.funds[0].clone();
     if principal_amount.amount.is_zero() {
         return Err(ContractError::ZeroAmount {});
     }
 
     // check if the lockup time has passed
-    if env.block.time.seconds() < duration {
+    if env.block.time.seconds() < config.lockup_duration_seconds {
         return Err(ContractError::PastLockupPeriod {});
     }
 
-    // check if the deposit is below the limit (10K C4E)
-    if principal_amount.amount < TIER_1_MIN {
+    // check if the deposit is below the limit
+    if principal_amount.amount < config.tier_config.tier_1_min {
         return Err(ContractError::DepositBelowMinimum {});
     }
 
-    let mut apr = TIER_1_APR;   // default value
-
-    // check if the deposit is above the limit (1 million c4e)
-    if principal_amount.amount > TIER_4_LIMIT {
+    // check if the deposit is above the limit
+    if principal_amount.amount > config.tier_config.tier_4_limit {
         return Err(ContractError::DepositExceedsLimit {});
     }
 
     // check if the user already has a lockup (for the tier upgrade system)
-    let (unlock_time, preserve_last_claim_time) = if LOCKUPS.has(deps.storage, info.sender.clone()) {
-        // load existing lockup, and check current tier
-        let existing_lockup = LOCKUPS.load(deps.storage, info.sender.clone())?;
-        let existing_tier = get_tier_for_amount(existing_lockup.principal_amount.amount);
+    let (unlock_time, preserve_last_claim_time, apr) =
+        if LOCKUPS.has(deps.storage, info.sender.clone()) {
 
-        // check if the new deposit is above the limit
-        if principal_amount.amount + existing_lockup.principal_amount.amount > TIER_4_LIMIT {
-            return Err(ContractError::DepositExceedsLimit {});
-        }
-        // check if the new apr applies
-        if get_tier_for_amount(existing_lockup.principal_amount.amount + principal_amount.amount) > existing_tier {
-            // set new apr
-            apr = get_apr_for_amount(existing_lockup.principal_amount.amount + principal_amount.amount);
+            // load existing lockup, and check current tier
+            let existing_lockup = LOCKUPS.load(deps.storage, info.sender.clone())?;
+            let existing_tier =
+                get_tier_for_amount(existing_lockup.principal_amount.amount, &config.tier_config);
+
+            // check if the new deposit is above the limit
+            if principal_amount.amount + existing_lockup.principal_amount.amount
+                > config.tier_config.tier_4_limit {
+                return Err(ContractError::DepositExceedsLimit {});
+            }
+
+            // check if the new deposit allows for new tier
+            let apr = if get_tier_for_amount(
+                existing_lockup.principal_amount.amount + principal_amount.amount,
+                &config.tier_config,
+            ) > existing_tier {
+                // set new apr
+                get_apr_for_amount(
+                    existing_lockup.principal_amount.amount + principal_amount.amount,
+                    &config.tier_config,
+                )
+            } else {
+                // dont update apr
+                get_apr_for_amount(principal_amount.amount, &config.tier_config)
+            };
+
+            // update the lockup balance
+            principal_amount.amount += existing_lockup.principal_amount.amount;
+
+            // calculate remaining time: keep the original unlock time, dont reset to full duration
+            (
+                existing_lockup.unlock_time,
+                existing_lockup.last_claim_time,
+                apr,
+            )
         } else {
-            // dont update apr
-            apr = get_apr_for_amount(principal_amount.amount);
-        }
-        // update the lockup balance
-        principal_amount.amount += existing_lockup.principal_amount.amount;
-
-        // calculate remaining time: keep the original unlock time, dont reset to full duration
-        (existing_lockup.unlock_time, existing_lockup.last_claim_time)
-    } else {
-        // continue lockup normally
-        apr = get_apr_for_amount(principal_amount.amount);
-        // new lockup gets full duration from current time
-        (env.block.time.plus_seconds(duration), env.block.time)
-    };
+            // continue initial lockup normally
+            let apr = get_apr_for_amount(principal_amount.amount, &config.tier_config);
+            // new lockup gets full duration from current time
+            (
+                env.block.time.plus_seconds(config.lockup_duration_seconds),
+                env.block.time,
+                apr,
+            )
+        };
 
     let lockup = Lockup {
         owner: info.sender.clone(),
@@ -232,9 +225,11 @@ pub fn execute_unlock_principal(
 
 pub fn execute_deposit_rewards(
     deps: DepsMut,
-    info: MessageInfo
+    info: MessageInfo,
 ) -> Result<Response, ContractError> {
     let config = CONFIG.load(deps.storage)?;
+
+    // only admin can deposit rewards
     if info.sender != config.admin {
         return Err(ContractError::Unauthorized {});
     }
@@ -254,11 +249,7 @@ pub fn execute_deposit_rewards(
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
-pub fn query(
-    deps: Deps,
-    env: Env,
-    msg: QueryMsg,
-) -> StdResult<Binary> {
+pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
     match msg {
         QueryMsg::GetConfig {} => to_json_binary(&CONFIG.load(deps.storage)?),
         QueryMsg::GetLockup { address } => {
@@ -276,31 +267,24 @@ pub fn query(
 }
 
 // === HELPER FUNCTIONS ===
-fn get_apr_for_amount(amount: Uint128) -> Decimal {
-    if amount >= TIER_4_MIN {
-        TIER_4_APR
-    } else if amount >= TIER_3_MIN {
-        TIER_3_APR
-    } else if amount >= TIER_2_MIN {
-        Decimal::from_atomics(35u32, 3).unwrap() // 3.5%
-    } else if amount >= TIER_1_MIN {
-        TIER_1_APR
-    } else {
-        Decimal::zero()
+
+fn get_apr_for_amount(amount: Uint128, tier_config: &TierConfig) -> Decimal {
+    match get_tier_for_amount(amount, tier_config) {
+        4 => tier_config.tier_4_apr,
+        3 => tier_config.tier_3_apr,
+        2 => tier_config.tier_2_apr,
+        1 => tier_config.tier_1_apr,
+        _ => Decimal::zero(),
     }
 }
 
-fn get_tier_for_amount(amount: Uint128) -> u8 {
-    if amount >= TIER_4_MIN {
-        4
-    } else if amount >= TIER_3_MIN {
-        3
-    } else if amount >= TIER_2_MIN {
-        2
-    } else if amount >= TIER_1_MIN {
-        1
-    } else {
-        0
+fn get_tier_for_amount(amount: Uint128, tier_config: &TierConfig) -> u8 {
+    match () {
+        _ if amount >= tier_config.tier_4_min => 4,
+        _ if amount >= tier_config.tier_3_min => 3,
+        _ if amount >= tier_config.tier_2_min => 2,
+        _ if amount >= tier_config.tier_1_min => 1,
+        _ => 0,
     }
 }
 
@@ -332,9 +316,11 @@ fn calculate_rewards(
     }
 
     // safe subtraction
-    let time_elapsed_seconds =
-        Decimal::from_atomics(effective_end_time.seconds() - lockup.last_claim_time.seconds(), 0)
-            .unwrap();
+    let time_elapsed_seconds = Decimal::from_atomics(
+        effective_end_time.seconds() - lockup.last_claim_time.seconds(),
+        0,
+    )
+    .unwrap();
 
     let year_fraction = time_elapsed_seconds / seconds_per_year;
 

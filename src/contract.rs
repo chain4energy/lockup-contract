@@ -167,7 +167,7 @@ pub fn execute_claim_rewards(
     let mut lockup = LOCKUPS.load(deps.storage, info.sender.clone())?;
     let config = CONFIG.load(deps.storage)?;
 
-    let rewards = calculate_rewards(&lockup, env.block.time, &config.denom)?;
+    let rewards = calculate_rewards(&lockup, env.block.time, &config.denom, &config.tier_config)?;
     if rewards.amount.is_zero() {
         return Err(ContractError::ZeroRewards {});
     }
@@ -204,7 +204,7 @@ pub fn execute_unlock_principal(
     }
 
     // calculate final pending rewards
-    let pending_rewards = calculate_rewards(&lockup, env.block.time, &config.denom)?;
+    let pending_rewards = calculate_rewards(&lockup, env.block.time, &config.denom, &config.tier_config)?;
 
     // final action, remove lockup from storage
     LOCKUPS.remove(deps.storage, info.sender.clone());
@@ -264,7 +264,7 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
             let addr = deps.api.addr_validate(&address)?;
             let lockup = LOCKUPS.load(deps.storage, addr)?;
             let config = CONFIG.load(deps.storage)?;
-            let rewards = calculate_rewards(&lockup, env.block.time, &config.denom)?;
+            let rewards = calculate_rewards(&lockup, env.block.time, &config.denom, &config.tier_config)?;
             to_json_binary(&rewards)
         }
         QueryMsg::GetAllLockups {} => {
@@ -322,6 +322,7 @@ fn calculate_rewards(
     lockup: &Lockup,
     current_time: cosmwasm_std::Timestamp,
     denom: &str,
+    tier_config: &TierConfig,
 ) -> StdResult<Coin> {
     if lockup.annual_percentage_rate.is_zero() {
         return Ok(Coin::new(0u128, denom));
@@ -331,31 +332,91 @@ fn calculate_rewards(
     }
 
     let seconds_per_year = Decimal::from_atomics(31_536_000u128, 0).unwrap();
-
-    // rewards should continue to accumulate even after unlock_time
-    // use current_time as the effective end time for reward calculation
-    let effective_end_time = current_time;
-
-    // if the effective end time is before or equal to last claim time, no rewards
-    /*if effective_end_time <= lockup.last_claim_time {
-        return Ok(Coin::new(0u128, denom));
-    }*/
-
-    // safe subtraction
-    let time_elapsed_seconds = Decimal::from_atomics(
-        effective_end_time.seconds() - lockup.last_claim_time.seconds(),
-        0,
-    )
-    .unwrap();
-
-    let year_fraction = time_elapsed_seconds / seconds_per_year;
-
-    // convert principal amount to Decimal for multiplication
     let principal_decimal = Decimal::from_atomics(lockup.principal_amount.amount, 0).unwrap();
-    let reward_decimal = principal_decimal * lockup.annual_percentage_rate * year_fraction;
 
-    // convert back to Uint128 - truncate decimal places
-    let reward_amount = reward_decimal.atomics() / Uint128::new(10u128.pow(18));
+    let start_seconds = lockup.start_time.seconds();
+    let last_claim_seconds = lockup.last_claim_time.seconds();
+    let current_seconds = current_time.seconds();
+
+    // calculate which year we are currently in and which year we last claimed
+    let time_since_start = current_seconds - start_seconds;
+    let last_claim_time_since_start = last_claim_seconds - start_seconds;
+
+    let current_year = time_since_start / 31_536_000; // 0-indexed years
+    let last_claim_year = last_claim_time_since_start / 31_536_000; // 0-indexed years
+
+    // if same year, use simple calculation
+    if current_year == last_claim_year {
+        let years_since_start_decimal = Decimal::from_atomics(time_since_start, 0).unwrap() / seconds_per_year;
+
+        let effective_apr = if years_since_start_decimal < Decimal::one() {
+            lockup.annual_percentage_rate
+        } else {
+            let years_past_first = years_since_start_decimal.floor();
+            let additional_percentage = years_past_first * tier_config.percentage_increase_per_year;
+            let capped_additional = if additional_percentage >= tier_config.max_percentage_increase {
+                tier_config.max_percentage_increase
+            } else {
+                additional_percentage
+            };
+            lockup.annual_percentage_rate + capped_additional
+        };
+
+        let time_elapsed_seconds = Decimal::from_atomics(current_seconds - last_claim_seconds, 0).unwrap();
+        let year_fraction = time_elapsed_seconds / seconds_per_year;
+        let reward_decimal = principal_decimal * effective_apr * year_fraction;
+        let reward_amount = reward_decimal.atomics() / Uint128::new(10u128.pow(18));
+
+        return Ok(Coin::new(reward_amount, denom));
+    }
+
+    // calculate year by year
+    let mut total_rewards = Decimal::zero();
+    let mut calculation_start = last_claim_seconds;
+
+    while calculation_start < current_seconds {
+        let time_since_start_calc = calculation_start - start_seconds;
+        let year_index = time_since_start_calc / 31_536_000; // 0-indexed year
+
+        // calculate effective APR for this year
+        let effective_apr = if year_index == 0 {
+            // first year (year 0): use base APR
+            lockup.annual_percentage_rate
+        } else {
+            // after first year: apply progressive increases
+            let years_past_first = Decimal::from_atomics(year_index, 0).unwrap();
+            let additional_percentage = years_past_first * tier_config.percentage_increase_per_year;
+
+            let capped_additional = if additional_percentage >= tier_config.max_percentage_increase {
+                tier_config.max_percentage_increase
+            } else {
+                additional_percentage
+            };
+
+            lockup.annual_percentage_rate + capped_additional
+        };
+
+        // find the end of current year or the end of calculation period
+        let year_end_seconds = start_seconds + ((year_index + 1) * 31_536_000);
+        let period_end = if year_end_seconds > current_seconds {
+            current_seconds
+        } else {
+            year_end_seconds
+        };
+
+        // calculate rewards for this period
+        let period_duration = period_end - calculation_start;
+        let period_fraction = Decimal::from_atomics(period_duration, 0).unwrap() / seconds_per_year;
+        let period_rewards = principal_decimal * effective_apr * period_fraction;
+
+        total_rewards += period_rewards;
+
+        // move to next period
+        calculation_start = period_end;
+    }
+
+    // convert back to Uint128
+    let reward_amount = total_rewards.atomics() / Uint128::new(10u128.pow(18));
 
     Ok(Coin::new(reward_amount, denom))
 }

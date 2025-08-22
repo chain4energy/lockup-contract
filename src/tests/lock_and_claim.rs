@@ -115,7 +115,12 @@ fn test_rewards_continue_after_lockup_period() {
     println!("Rewards after 2 additional years: {}", rewards_after_extended_time.amount);
 
     // rewards should NOW continue to accumulate even after unlock time (3 years total)
-    let expected_three_year_rewards = lock_amount * 8 / 100 * 3; // 3 years at 8% APR
+    // rewards past the first year will now include the 1% and 2% APR increase
+    let expected_three_year_rewards =
+        lock_amount * 8 / 100 +
+        lock_amount * 9 / 100 + // Year 2: 9% APR
+        lock_amount * 10 / 100; // Year 3: 10% APR
+
     assert_eq!(
         rewards_after_extended_time.amount,
         Uint128::new(expected_three_year_rewards),
@@ -133,8 +138,8 @@ fn test_rewards_continue_after_lockup_period() {
 
     println!("Rewards after claim and more time: {}", rewards_after_claim_and_time.amount);
 
-    // should be 1 year worth of rewards since rewards continue to accumulate
-    let expected_one_more_year_rewards = lock_amount * 8 / 100; // 1 year at 8% APR
+    // should be 1 year worth of rewards since rewards continue to accumulate (with extra APR)
+    let expected_one_more_year_rewards = lock_amount * 11 / 100; // 1 year at 11% APR
     assert_eq!(
         rewards_after_claim_and_time.amount,
         Uint128::new(expected_one_more_year_rewards),
@@ -149,7 +154,7 @@ fn test_rewards_continue_after_lockup_period() {
     // should have: initial balance - locked amount + 3 years rewards + 1 year rewards + principal back
     // Total rewards: 3 years (claimed) + 1 year (new accumulation) = 4 years worth
     let total_rewards_claimed = expected_three_year_rewards + expected_one_more_year_rewards;
-    let expected_final_balance = 1_000_000_000_000_000u128 - lock_amount + total_rewards_claimed + lock_amount;
+    let expected_final_balance = 1_000_000_000_000_000u128 + total_rewards_claimed;
 
     println!("Final balance:            {}", final_user_balance.amount);
     println!("Expected final balance:   {}", expected_final_balance);
@@ -181,7 +186,10 @@ fn test_claim_rewards_after_lockup_period_ends() {
 
     // 5. check user balance - should only get 1 year worth of rewards, not 3 years
     let user_balance = app.wrap().query_balance(&user_addr, DENOM).unwrap();
-    let expected_rewards = lock_amount * (8*3) / 100; // 3 years at 8% APR
+    let expected_rewards =
+        lock_amount * 8 / 100 + // 1 year at 8% APR
+        lock_amount * 9 / 100 + // 2 years at 9% APR
+        lock_amount * 10 / 100;  // 3 years at 10% APR
     let expected_balance = 1_000_000_000_000_000u128 - lock_amount + expected_rewards;
 
     println!("User balance after claiming:                  {}", user_balance.amount);
@@ -533,6 +541,48 @@ fn test_start_time_preservation_on_tier_upgrade() {
     println!("Initial start time: {}", initial_start_time);
     println!("Updated start time: {}", updated_lockup.start_time);
 }
+
+
+#[test]
+fn test_progressive_apr_10year() {
+    let (mut app, contract_addr) = proper_instantiate();
+
+    // get proper addresses
+    let admin_addr = app.api().addr_make(ADMIN);
+    let user_addr = app.api().addr_make(USER_1);
+
+    // 1. admin deposits rewards
+    deposit_rewards(&mut app, &contract_addr, &admin_addr, 1_000_000 * C4E_1);
+
+    // 2. user locks 100k C4E (Tier 3: 5% base APR)
+    let lock_amount = 100_000 * C4E_1;
+    lock_funds(&mut app, &contract_addr, &user_addr, lock_amount);
+
+    // 3. advance time by 10 years
+    advance_time(&mut app, 10 * 31_536_000); // 10 years
+
+    let expected_rewards =
+        lock_amount * 5 / 100 +  // Year 1: 5%
+        lock_amount * 6 / 100 +  // Year 2: 6%
+        lock_amount * 7 / 100 +  // Year 3: 7%
+        lock_amount * 8 / 100 +  // Year 4: 8%
+        lock_amount * 9 / 100 +  // Year 5: 9%
+        lock_amount * 10 / 100 + // Year 6: 10%
+        lock_amount * 11 / 100 + // Year 7: 11%
+        lock_amount * 12 / 100 + // Year 8: 12%
+        lock_amount * 13 / 100 + // Year 9: 13%
+        lock_amount * 14 / 100;  // Year 10: 14%
+    // = 95_000_000_000
+
+    // 4. query rewards
+    let rewards = query_rewards(&app, &contract_addr, &user_addr);
+    println!("Total rewards after 10 years: {}", rewards.amount);
+    println!("Expected rewards after 10 years: {}", expected_rewards);
+
+    // 5. rewards should match expected rewards
+   assert_eq!(rewards.amount, Uint128::new(expected_rewards));
+}
+
 
 // helper functions
 fn deposit_rewards(app: &mut App, contract_addr: &Addr, admin_addr: &Addr, amount: u128) {

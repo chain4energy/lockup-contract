@@ -6,7 +6,7 @@ use cosmwasm_std::{
 use cw2::set_contract_version;
 
 use crate::error::ContractError;
-use crate::msg::{ExecuteMsg, InstantiateMsg, QueryMsg};
+use crate::msg::{ExecuteMsg, InstantiateMsg, QueryMsg, AllLockupsResponse, LockupInfo};
 use crate::state::{Config, Lockup, TierConfig, CONFIG, LOCKUPS};
 
 const CONTRACT_NAME:    &str = "crates.io:lockup-contract";
@@ -90,7 +90,7 @@ pub fn execute_lock(deps: DepsMut, env: Env, info: MessageInfo) -> Result<Respon
     }
 
     // check if the user already has a lockup (for the tier upgrade system)
-    let (unlock_time, preserve_last_claim_time, apr) =
+    let (unlock_time, preserve_last_claim_time, preserve_start_time, apr) =
         if LOCKUPS.has(deps.storage, info.sender.clone()) {
 
             // load existing lockup, and check current tier
@@ -123,9 +123,11 @@ pub fn execute_lock(deps: DepsMut, env: Env, info: MessageInfo) -> Result<Respon
             principal_amount.amount += existing_lockup.principal_amount.amount;
 
             // calculate remaining time: keep the original unlock time, dont reset to full duration
+            // also preserve the original start time
             (
                 existing_lockup.unlock_time,
                 existing_lockup.last_claim_time,
+                existing_lockup.start_time,
                 apr,
             )
         } else {
@@ -135,6 +137,7 @@ pub fn execute_lock(deps: DepsMut, env: Env, info: MessageInfo) -> Result<Respon
             (
                 env.block.time.plus_seconds(config.lockup_duration_seconds),
                 env.block.time,
+                env.block.time, // start time is current time for new lockups
                 apr,
             )
         };
@@ -145,6 +148,7 @@ pub fn execute_lock(deps: DepsMut, env: Env, info: MessageInfo) -> Result<Respon
         unlock_time,
         annual_percentage_rate: apr,
         last_claim_time: preserve_last_claim_time,
+        start_time: preserve_start_time,
     };
     LOCKUPS.save(deps.storage, info.sender.clone(), &lockup)?;
 
@@ -263,6 +267,11 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
             let rewards = calculate_rewards(&lockup, env.block.time, &config.denom)?;
             to_json_binary(&rewards)
         }
+        QueryMsg::GetAllLockups {} => {
+            let config = CONFIG.load(deps.storage)?;
+            let all_lockups = query_all_lockups(deps, &config)?;
+            to_json_binary(&all_lockups)
+        }
     }
 }
 
@@ -288,6 +297,27 @@ fn get_tier_for_amount(amount: Uint128, tier_config: &TierConfig) -> u8 {
     }
 }
 
+fn query_all_lockups(deps: Deps, config: &Config) -> StdResult<AllLockupsResponse> {
+    let lockups: StdResult<Vec<LockupInfo>> = LOCKUPS
+        .range(deps.storage, None, None, cosmwasm_std::Order::Ascending)
+        .map(|item| {
+            let (addr, lockup) = item?;
+            let tier = get_tier_for_amount(lockup.principal_amount.amount, &config.tier_config);
+            Ok(LockupInfo {
+                address: addr.to_string(),
+                start_time: lockup.start_time,
+                principal_amount: lockup.principal_amount.amount,
+                annual_percentage_rate: lockup.annual_percentage_rate,
+                tier,
+            })
+        })
+        .collect();
+
+    Ok(AllLockupsResponse {
+        lockups: lockups?,
+    })
+}
+
 fn calculate_rewards(
     lockup: &Lockup,
     current_time: cosmwasm_std::Timestamp,
@@ -302,18 +332,14 @@ fn calculate_rewards(
 
     let seconds_per_year = Decimal::from_atomics(31_536_000u128, 0).unwrap();
 
-    // determine the effective end time for reward calculation
-    // rewards should only accumulate up to the unlock_time, not beyond
-    let effective_end_time = if current_time > lockup.unlock_time {
-        lockup.unlock_time
-    } else {
-        current_time
-    };
+    // rewards should continue to accumulate even after unlock_time
+    // use current_time as the effective end time for reward calculation
+    let effective_end_time = current_time;
 
     // if the effective end time is before or equal to last claim time, no rewards
-    if effective_end_time <= lockup.last_claim_time {
+    /*if effective_end_time <= lockup.last_claim_time {
         return Ok(Coin::new(0u128, denom));
-    }
+    }*/
 
     // safe subtraction
     let time_elapsed_seconds = Decimal::from_atomics(

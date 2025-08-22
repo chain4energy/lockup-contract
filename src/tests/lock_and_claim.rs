@@ -48,7 +48,7 @@ fn test_lock_and_claim_flow() {
     assert_eq!(user_balance.amount, Uint128::new(expected_balance));
 
     // 8. advance time past the unlock period
-    advance_time(&mut app, 31_536_000 / 2 + 1);
+    advance_time(&mut app, 31_536_000 / 2);
 
     // 9. unlock principal
     unlock_lockup(&mut app, &contract_addr, &user_addr);
@@ -77,7 +77,7 @@ fn test_lock_and_claim_flow() {
 }
 
 #[test]
-fn test_rewards_stop_after_lockup_period() {
+fn test_rewards_continue_after_lockup_period() {
     let (mut app, contract_addr) = proper_instantiate();
 
     // get proper addresses
@@ -114,11 +114,12 @@ fn test_rewards_stop_after_lockup_period() {
 
     println!("Rewards after 2 additional years: {}", rewards_after_extended_time.amount);
 
-    // rewards should NOT have increased beyond the unlock time
+    // rewards should NOW continue to accumulate even after unlock time (3 years total)
+    let expected_three_year_rewards = lock_amount * 8 / 100 * 3; // 3 years at 8% APR
     assert_eq!(
-        rewards_at_unlock.amount,
         rewards_after_extended_time.amount,
-        "Rewards should not accumulate after lockup period ends"
+        Uint128::new(expected_three_year_rewards),
+        "Rewards should continue to accumulate after lockup period ends"
     );
 
     // 7. user claims rewards
@@ -132,11 +133,12 @@ fn test_rewards_stop_after_lockup_period() {
 
     println!("Rewards after claim and more time: {}", rewards_after_claim_and_time.amount);
 
-    // should be zero since no new rewards should accumulate after unlock time
+    // should be 1 year worth of rewards since rewards continue to accumulate
+    let expected_one_more_year_rewards = lock_amount * 8 / 100; // 1 year at 8% APR
     assert_eq!(
         rewards_after_claim_and_time.amount,
-        Uint128::zero(),
-        "No new rewards should accumulate after lockup period and claiming"
+        Uint128::new(expected_one_more_year_rewards),
+        "New rewards should accumulate after claiming"
     );
 
     // 10. finally unlock principal - should work even years after lockup period
@@ -144,8 +146,10 @@ fn test_rewards_stop_after_lockup_period() {
 
     // 11. verify user got back their principal amount
     let final_user_balance = app.wrap().query_balance(&user_addr, DENOM).unwrap();
-    // should have: initial balance - locked amount + full year rewards + principal back
-    let expected_final_balance = 1_000_000_000_000_000u128 - lock_amount + expected_full_year_rewards + lock_amount;
+    // should have: initial balance - locked amount + 3 years rewards + 1 year rewards + principal back
+    // Total rewards: 3 years (claimed) + 1 year (new accumulation) = 4 years worth
+    let total_rewards_claimed = expected_three_year_rewards + expected_one_more_year_rewards;
+    let expected_final_balance = 1_000_000_000_000_000u128 - lock_amount + total_rewards_claimed + lock_amount;
 
     println!("Final balance:            {}", final_user_balance.amount);
     println!("Expected final balance:   {}", expected_final_balance);
@@ -177,7 +181,7 @@ fn test_claim_rewards_after_lockup_period_ends() {
 
     // 5. check user balance - should only get 1 year worth of rewards, not 3 years
     let user_balance = app.wrap().query_balance(&user_addr, DENOM).unwrap();
-    let expected_rewards = lock_amount * 8 / 100; // only 1 year worth
+    let expected_rewards = lock_amount * (8*3) / 100; // 3 years at 8% APR
     let expected_balance = 1_000_000_000_000_000u128 - lock_amount + expected_rewards;
 
     println!("User balance after claiming:                  {}", user_balance.amount);
@@ -255,7 +259,7 @@ fn test_deposit_with_lockup() {
     assert_eq!(lockup.annual_percentage_rate, Decimal::percent(8 as u64));
 
     // 9. advance block time until the end of the lockup
-    advance_time(&mut app, 31_536_000 / 2 + 1);
+    advance_time(&mut app, 31_536_000 / 2);
 
     // 10. check claimable balance
     // the reward should be at 8% APR
@@ -401,7 +405,7 @@ fn test_lock_and_claim_for_tier3() {
     assert_eq!(user_balance.amount, Uint128::new(expected_balance));
 
     // 8. advance time past the unlock period
-    advance_time(&mut app, 31_536_000);
+    advance_time(&mut app, 31_536_000 / 2);
 
     // 9. unlock principal
     unlock_lockup(&mut app, &contract_addr, &user_addr);
@@ -431,6 +435,104 @@ fn test_lock_and_claim_for_tier3() {
 
 }
 
+
+#[test]
+fn test_get_all_lockups_query() {
+    use crate::msg::AllLockupsResponse;
+
+    let (mut app, contract_addr) = proper_instantiate();
+
+    // get proper addresses
+    let admin_addr = app.api().addr_make(ADMIN);
+    let user1_addr = app.api().addr_make(USER_1);
+
+    // 1. admin deposits rewards
+    deposit_rewards(&mut app, &contract_addr, &admin_addr, 1_000_000 * C4E_1);
+
+    // 2. user locks 100k C4E (Tier 3: 5% APR)
+    let lock_amount1 = 100_000 * C4E_1;
+    lock_funds(&mut app, &contract_addr, &user1_addr, lock_amount1);
+
+    // 3. query all lockups
+    let all_lockups: AllLockupsResponse = app.wrap().query_wasm_smart(
+        contract_addr.clone(),
+        &QueryMsg::GetAllLockups {}
+    ).unwrap();
+
+    // 4. verify the response
+    assert_eq!(all_lockups.lockups.len(), 1);
+
+    // find user1 lockup
+    let user1_lockup = &all_lockups.lockups[0];
+    assert_eq!(user1_lockup.address, user1_addr.to_string());
+    assert_eq!(user1_lockup.principal_amount, Uint128::new(lock_amount1));
+    assert_eq!(user1_lockup.annual_percentage_rate, Decimal::percent(5));
+    assert_eq!(user1_lockup.tier, 3);
+
+    println!("All lockups query test passed!");
+    println!("User: {}", user1_lockup.address);
+    println!("Amount: {}", user1_lockup.principal_amount);
+    println!("APR: {}%", user1_lockup.annual_percentage_rate * Decimal::from_atomics(100u128, 0).unwrap());
+    println!("Tier: {}", user1_lockup.tier);
+    println!("Start Time: {}", user1_lockup.start_time);
+
+    // verify that start_time is reasonable
+    // should be close to current block time
+    assert!(user1_lockup.start_time.seconds() > 0, "Start time should be set");
+}
+
+#[test]
+fn test_start_time_preservation_on_tier_upgrade() {
+    use crate::msg::AllLockupsResponse;
+
+    let (mut app, contract_addr) = proper_instantiate();
+
+    // get proper addresses
+    let admin_addr = app.api().addr_make(ADMIN);
+    let user_addr = app.api().addr_make(USER_1);
+
+    // 1. admin deposits rewards
+    deposit_rewards(&mut app, &contract_addr, &admin_addr, 1_000_000 * C4E_1);
+
+    // 2. user locks initial amount (Tier 1: 10k C4E)
+    let initial_amount = 10_000 * C4E_1;
+    lock_funds(&mut app, &contract_addr, &user_addr, initial_amount);
+
+    // 3. query to get the initial start time
+    let initial_lockups: AllLockupsResponse = app.wrap().query_wasm_smart(
+        contract_addr.clone(),
+        &QueryMsg::GetAllLockups {}
+    ).unwrap();
+    let initial_start_time = initial_lockups.lockups[0].start_time;
+
+    // 4. advance time a bit
+    advance_time(&mut app, 1000); // 1000 seconds
+
+    // 5. user locks more funds to upgrade tier (total: 500k = Tier 4)
+    let additional_amount = 490_000 * C4E_1;
+    lock_funds(&mut app, &contract_addr, &user_addr, additional_amount);
+
+    // 6. query again to verify start time is preserved
+    let updated_lockups: AllLockupsResponse = app.wrap().query_wasm_smart(
+        contract_addr.clone(),
+        &QueryMsg::GetAllLockups {}
+    ).unwrap();
+
+    let updated_lockup = &updated_lockups.lockups[0];
+
+    // verify the tier was upgraded
+    assert_eq!(updated_lockup.tier, 4);
+    assert_eq!(updated_lockup.annual_percentage_rate, Decimal::percent(8));
+    assert_eq!(updated_lockup.principal_amount, Uint128::new(initial_amount + additional_amount));
+
+    // verify start time was preserved
+    assert_eq!(updated_lockup.start_time, initial_start_time,
+               "Start time should be preserved when upgrading tiers");
+
+    println!("Tier upgrade preserves start time test passed!");
+    println!("Initial start time: {}", initial_start_time);
+    println!("Updated start time: {}", updated_lockup.start_time);
+}
 
 // helper functions
 fn deposit_rewards(app: &mut App, contract_addr: &Addr, admin_addr: &Addr, amount: u128) {

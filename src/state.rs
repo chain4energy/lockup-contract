@@ -21,6 +21,11 @@ pub struct TierConfig {
     pub tier_3_apr: Decimal,
     pub tier_4_apr: Decimal,
     //
+
+    // === percentage increases and limits past lockup period ===
+    pub percentage_increase_per_year: Decimal,
+    pub max_percentage_increase: Decimal,
+    //
 }
 
 #[cw_serde]
@@ -38,6 +43,7 @@ pub struct Lockup {
     pub unlock_time: Timestamp,             // time when the original amount can be withdrawn
     pub annual_percentage_rate: Decimal,    // annual percentage rate for this lockup tier
     pub last_claim_time: Timestamp,         // last time rewards were claimed or the lockup was created
+    pub start_time: Timestamp,              // exact time when the lockup was first created
 }
 
 pub const CONFIG: Item<Config> = Item::new("config");

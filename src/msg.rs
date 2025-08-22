@@ -1,6 +1,6 @@
 use crate::state::{Config, Lockup, TierConfig};
 use cosmwasm_schema::{cw_serde, QueryResponses};
-use cosmwasm_std::Coin;
+use cosmwasm_std::{Coin, Timestamp, Decimal, Uint128};
 
 #[cw_serde]
 pub struct InstantiateMsg {
@@ -27,6 +27,20 @@ pub enum ExecuteMsg {
 }
 
 #[cw_serde]
+pub struct LockupInfo {
+    pub address: String,
+    pub start_time: Timestamp,
+    pub principal_amount: Uint128,
+    pub annual_percentage_rate: Decimal,
+    pub tier: u8,
+}
+
+#[cw_serde]
+pub struct AllLockupsResponse {
+    pub lockups: Vec<LockupInfo>,
+}
+
+#[cw_serde]
 #[derive(QueryResponses)]
 pub enum QueryMsg {
     // returns the contracts configuration
@@ -40,4 +54,13 @@ pub enum QueryMsg {
     // calculates and returns the currently claimable rewards for an address
     #[returns(Coin)]
     GetClaimableRewards { address: String },
+
+    // returns all lockups with their details:
+    //  - address
+    //  - principal_amount
+    //  - APR
+    //  - tier
+    //  - start_time
+    #[returns(AllLockupsResponse)]
+    GetAllLockups {},
 }

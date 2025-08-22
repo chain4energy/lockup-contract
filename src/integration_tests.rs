@@ -72,6 +72,8 @@ mod tests {
                 tier_2_apr: Decimal::from_atomics(35u32, 3).unwrap(),       // 3.5%
                 tier_3_apr: Decimal::percent(5),                                                    // 5%
                 tier_4_apr: Decimal::percent(8),                                                    // 8%
+                percentage_increase_per_year: Decimal::percent(1),                                  // 1% increase per year past lockup
+                max_percentage_increase: Decimal::percent(20),                                      // 20% max increase
             },
         };
         let lockup_contract_addr = app

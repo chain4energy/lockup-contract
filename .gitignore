@@ -22,7 +22,3 @@ artifacts/
 Cargo.lock
 .env
 disable-*
-
-Developing.md
-Importing.md
-Publishing.md

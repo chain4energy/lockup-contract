@@ -30,7 +30,7 @@ pub struct TierConfig {
 
 #[cw_serde]
 pub struct Config {
-    pub admin: Addr,
+    pub admins: Vec<Addr>,
     pub denom: String,
     pub lockup_duration_seconds: u64,
     pub tier_config: TierConfig,

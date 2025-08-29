@@ -59,7 +59,7 @@ mod tests {
         );
 
         let msg = InstantiateMsg {
-            admin: None,
+            admins: None,
             denom: NATIVE_DENOM.to_string(),
             lockup_duration_seconds: 86400, // 1 day for testing
             tier_config: crate::state::TierConfig {

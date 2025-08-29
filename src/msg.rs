@@ -4,7 +4,7 @@ use cosmwasm_std::{Coin, Timestamp, Decimal, Uint128};
 
 #[cw_serde]
 pub struct InstantiateMsg {
-    pub admin: Option<String>,
+    pub admins: Option<Vec<String>>,
     // native token denomination:
     pub denom: String,
     // lockup duration in seconds (e.g., 31_536_000 for 1 year)
@@ -63,4 +63,21 @@ pub enum QueryMsg {
     //  - start_time
     #[returns(AllLockupsResponse)]
     GetAllLockups {},
+
+    // returns the total amount of available rewards currently deposited in the contract
+    #[returns(Coin)]
+    GetDepositedRewards {},
+
+    // returns the sum of lockups and sum of deposited amounts
+    #[returns((Uint128, Coin))]
+    GetSumLockupsAndDeposits {},
+
+    // returns the total amount of all rewards (claimed and unclaimed) for all users
+    #[returns(Coin)]
+    GetAllRewards {},
+
+    // checks if the the reward pool has enough funds to cover all rewards for 1 year
+    // returns a boolean
+    #[returns(bool)]
+    CheckCoinAvailability {},
 }

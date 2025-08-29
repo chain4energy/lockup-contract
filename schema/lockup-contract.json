@@ -12,11 +12,14 @@
       "tier_config"
     ],
     "properties": {
-      "admin": {
+      "admins": {
         "type": [
-          "string",
+          "array",
           "null"
-        ]
+        ],
+        "items": {
+          "type": "string"
+        }
       },
       "denom": {
         "type": "string"
@@ -39,6 +42,8 @@
       "TierConfig": {
         "type": "object",
         "required": [
+          "max_percentage_increase",
+          "percentage_increase_per_year",
           "tier_1_apr",
           "tier_1_min",
           "tier_2_apr",
@@ -50,6 +55,12 @@
           "tier_4_min"
         ],
         "properties": {
+          "max_percentage_increase": {
+            "$ref": "#/definitions/Decimal"
+          },
+          "percentage_increase_per_year": {
+            "$ref": "#/definitions/Decimal"
+          },
           "tier_1_apr": {
             "$ref": "#/definitions/Decimal"
           },
@@ -215,12 +226,69 @@
           }
         },
         "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "required": [
+          "get_deposited_rewards"
+        ],
+        "properties": {
+          "get_deposited_rewards": {
+            "type": "object",
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "required": [
+          "get_sum_lockups_and_deposits"
+        ],
+        "properties": {
+          "get_sum_lockups_and_deposits": {
+            "type": "object",
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "required": [
+          "get_all_rewards"
+        ],
+        "properties": {
+          "get_all_rewards": {
+            "type": "object",
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      },
+      {
+        "type": "object",
+        "required": [
+          "check_coin_availability"
+        ],
+        "properties": {
+          "check_coin_availability": {
+            "type": "object",
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
       }
     ]
   },
   "migrate": null,
   "sudo": null,
   "responses": {
+    "check_coin_availability": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "Boolean",
+      "type": "boolean"
+    },
     "get_all_lockups": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "title": "AllLockupsResponse",
@@ -290,6 +358,30 @@
         }
       }
     },
+    "get_all_rewards": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "Coin",
+      "type": "object",
+      "required": [
+        "amount",
+        "denom"
+      ],
+      "properties": {
+        "amount": {
+          "$ref": "#/definitions/Uint128"
+        },
+        "denom": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "definitions": {
+        "Uint128": {
+          "description": "A thin wrapper around u128 that is using strings for JSON encoding/decoding, such that the full u128 range can be used for clients that convert JSON numbers to floats, like JavaScript and jq.\n\n# Examples\n\nUse `from` to create instances of this and `u128` to get the value out:\n\n``` # use cosmwasm_std::Uint128; let a = Uint128::from(123u128); assert_eq!(a.u128(), 123);\n\nlet b = Uint128::from(42u64); assert_eq!(b.u128(), 42);\n\nlet c = Uint128::from(70u32); assert_eq!(c.u128(), 70); ```",
+          "type": "string"
+        }
+      }
+    },
     "get_claimable_rewards": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "title": "Coin",
@@ -319,14 +411,17 @@
       "title": "Config",
       "type": "object",
       "required": [
-        "admin",
+        "admins",
         "denom",
         "lockup_duration_seconds",
         "tier_config"
       ],
       "properties": {
-        "admin": {
-          "$ref": "#/definitions/Addr"
+        "admins": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Addr"
+          }
         },
         "denom": {
           "type": "string"
@@ -353,6 +448,8 @@
         "TierConfig": {
           "type": "object",
           "required": [
+            "max_percentage_increase",
+            "percentage_increase_per_year",
             "tier_1_apr",
             "tier_1_min",
             "tier_2_apr",
@@ -364,6 +461,12 @@
             "tier_4_min"
           ],
           "properties": {
+            "max_percentage_increase": {
+              "$ref": "#/definitions/Decimal"
+            },
+            "percentage_increase_per_year": {
+              "$ref": "#/definitions/Decimal"
+            },
             "tier_1_apr": {
               "$ref": "#/definitions/Decimal"
             },
@@ -394,6 +497,30 @@
           },
           "additionalProperties": false
         },
+        "Uint128": {
+          "description": "A thin wrapper around u128 that is using strings for JSON encoding/decoding, such that the full u128 range can be used for clients that convert JSON numbers to floats, like JavaScript and jq.\n\n# Examples\n\nUse `from` to create instances of this and `u128` to get the value out:\n\n``` # use cosmwasm_std::Uint128; let a = Uint128::from(123u128); assert_eq!(a.u128(), 123);\n\nlet b = Uint128::from(42u64); assert_eq!(b.u128(), 42);\n\nlet c = Uint128::from(70u32); assert_eq!(c.u128(), 70); ```",
+          "type": "string"
+        }
+      }
+    },
+    "get_deposited_rewards": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "Coin",
+      "type": "object",
+      "required": [
+        "amount",
+        "denom"
+      ],
+      "properties": {
+        "amount": {
+          "$ref": "#/definitions/Uint128"
+        },
+        "denom": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "definitions": {
         "Uint128": {
           "description": "A thin wrapper around u128 that is using strings for JSON encoding/decoding, such that the full u128 range can be used for clients that convert JSON numbers to floats, like JavaScript and jq.\n\n# Examples\n\nUse `from` to create instances of this and `u128` to get the value out:\n\n``` # use cosmwasm_std::Uint128; let a = Uint128::from(123u128); assert_eq!(a.u128(), 123);\n\nlet b = Uint128::from(42u64); assert_eq!(b.u128(), 42);\n\nlet c = Uint128::from(70u32); assert_eq!(c.u128(), 70); ```",
           "type": "string"
@@ -472,6 +599,43 @@
         },
         "Uint64": {
           "description": "A thin wrapper around u64 that is using strings for JSON encoding/decoding, such that the full u64 range can be used for clients that convert JSON numbers to floats, like JavaScript and jq.\n\n# Examples\n\nUse `from` to create instances of this and `u64` to get the value out:\n\n``` # use cosmwasm_std::Uint64; let a = Uint64::from(42u64); assert_eq!(a.u64(), 42);\n\nlet b = Uint64::from(70u32); assert_eq!(b.u64(), 70); ```",
+          "type": "string"
+        }
+      }
+    },
+    "get_sum_lockups_and_deposits": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "Tuple_of_Uint128_and_Coin",
+      "type": "array",
+      "items": [
+        {
+          "$ref": "#/definitions/Uint128"
+        },
+        {
+          "$ref": "#/definitions/Coin"
+        }
+      ],
+      "maxItems": 2,
+      "minItems": 2,
+      "definitions": {
+        "Coin": {
+          "type": "object",
+          "required": [
+            "amount",
+            "denom"
+          ],
+          "properties": {
+            "amount": {
+              "$ref": "#/definitions/Uint128"
+            },
+            "denom": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "Uint128": {
+          "description": "A thin wrapper around u128 that is using strings for JSON encoding/decoding, such that the full u128 range can be used for clients that convert JSON numbers to floats, like JavaScript and jq.\n\n# Examples\n\nUse `from` to create instances of this and `u128` to get the value out:\n\n``` # use cosmwasm_std::Uint128; let a = Uint128::from(123u128); assert_eq!(a.u128(), 123);\n\nlet b = Uint128::from(42u64); assert_eq!(b.u128(), 42);\n\nlet c = Uint128::from(70u32); assert_eq!(c.u128(), 70); ```",
           "type": "string"
         }
       }

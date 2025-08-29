@@ -22,23 +22,38 @@ pub fn instantiate(
     set_contract_version(deps.storage, CONTRACT_NAME, CONTRACT_VERSION)?;
 
     // use message sender as admin if not specified,
-    // otherwise validate the provided address
-    let admin = msg.admin.map_or(Ok(info.sender.clone()), |addr| {
-        deps.api.addr_validate(&addr)
-    })?;
+    // otherwise validate the provided addresses
+    let admins = if let Some(admin_strings) = msg.admins {
+        // validate all provided admin addresses
+        let mut validated_admins = Vec::new();
+        for admin_str in admin_strings {
+            let admin_addr = deps.api.addr_validate(&admin_str)?;
+            validated_admins.push(admin_addr);
+        }
+        validated_admins
+    } else {
+        // if no admins specified, use message sender as the only admin
+        vec![info.sender.clone()]
+    };
 
     // configurable lockup time, tier levels and rewards
     let config = Config {
-        admin,
+        admins,
         denom: msg.denom,
         lockup_duration_seconds: msg.lockup_duration_seconds,
         tier_config: msg.tier_config,
     };
     CONFIG.save(deps.storage, &config)?;
 
+    // create a comma-separated string of admin addresses
+    let admins_str = config.admins.iter()
+        .map(|addr| addr.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+
     Ok(Response::new()
         .add_attribute("method", "instantiate")
-        .add_attribute("admin", config.admin.to_string())
+        .add_attribute("admins", admins_str)
         .add_attribute("denom", config.denom))
 }
 
@@ -73,6 +88,33 @@ pub fn execute_lock(deps: DepsMut, env: Env, info: MessageInfo) -> Result<Respon
     if principal_amount.amount.is_zero() {
         return Err(ContractError::ZeroAmount {});
     }
+
+    // check if we have sufficient funds for rewards
+    let available_rewards = query_available_rewards(deps.as_ref(), env.clone(), &config)?;
+    let current_required = query_rewards_per_year(deps.as_ref(), &config)?;
+
+    // calculate additional monthly rewards required for this new lockup
+    let new_apr = get_apr_for_amount(principal_amount.amount, &config.tier_config);
+    let max_apr = new_apr + config.tier_config.max_percentage_increase;
+    let principal_decimal = Decimal::from_atomics(principal_amount.amount, 0).unwrap();
+    let additional_yearly_rewards = principal_decimal * max_apr;
+    let additional_monthly_rewards = additional_yearly_rewards / Decimal::from_atomics(12u128, 0).unwrap();
+    let additional_required = additional_monthly_rewards.atomics() / Uint128::new(10u128.pow(18));
+
+    let total_required = current_required.amount + additional_required;
+
+    // adjust available rewards by excluding the principal amount
+    let adjusted_available = available_rewards.amount.checked_sub(principal_amount.amount)
+        .unwrap_or(Uint128::zero());
+
+    if adjusted_available < total_required {
+        return Err(ContractError::Std(StdError::generic_err(
+            format!("Insufficient reward funds: available {} {}, required {} {}",
+                    adjusted_available, available_rewards.denom,
+                    total_required, config.denom)
+        )));
+    }
+
 
     // check if the lockup time has passed
     if env.block.time.seconds() < config.lockup_duration_seconds {
@@ -233,8 +275,8 @@ pub fn execute_deposit_rewards(
 ) -> Result<Response, ContractError> {
     let config = CONFIG.load(deps.storage)?;
 
-    // only admin can deposit rewards
-    if info.sender != config.admin {
+    // only admins can deposit rewards
+    if !config.admins.contains(&info.sender) {
         return Err(ContractError::Unauthorized {});
     }
     if info.funds.is_empty() {
@@ -271,6 +313,25 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
             let config = CONFIG.load(deps.storage)?;
             let all_lockups = query_all_lockups(deps, &config)?;
             to_json_binary(&all_lockups)
+        }
+        QueryMsg::GetDepositedRewards {} => {
+            let config = CONFIG.load(deps.storage)?;
+            let deposited_rewards = query_available_rewards(deps, env, &config)?;
+            to_json_binary(&deposited_rewards)
+        }
+        QueryMsg::GetSumLockupsAndDeposits {} => {
+            let config = CONFIG.load(deps.storage)?;
+            let sum_data = query_sum_lockups_and_deposits(deps, env, &config)?;
+            to_json_binary(&sum_data)
+        }
+        QueryMsg::GetAllRewards {} => {
+            let config = CONFIG.load(deps.storage)?;
+            let all_rewards = query_rewards_per_year(deps, &config)?;
+            to_json_binary(&all_rewards)
+        }
+        QueryMsg::CheckCoinAvailability {  } => {
+            let is_sufficient = check_coin_availability(deps, env)?;
+            to_json_binary(&is_sufficient)
         }
     }
 }
@@ -316,6 +377,89 @@ fn query_all_lockups(deps: Deps, config: &Config) -> StdResult<AllLockupsRespons
     Ok(AllLockupsResponse {
         lockups: lockups?,
     })
+}
+
+fn query_sum_lockups_and_deposits(deps: Deps, _env: Env, config: &Config) -> StdResult<(Uint128, Coin)> {
+    // count lockups and sum their principal amounts
+    let mut lockup_count = 0u128;
+    let mut total_principal = Uint128::zero();
+
+    for item in LOCKUPS.range(deps.storage, None, None, cosmwasm_std::Order::Ascending) {
+        let (_, lockup) = item?;
+        lockup_count += 1;
+        total_principal += lockup.principal_amount
+        .amount;
+    }
+
+    let principal_coin = Coin::new(total_principal, &config.denom);
+
+    Ok((Uint128::new(lockup_count), principal_coin))
+}
+
+fn query_available_rewards(deps: Deps, env: Env, config: &Config) -> StdResult<Coin> {
+    // get total contract balance
+    let total_balance = deps.querier.query_balance(env.contract.address, &config.denom)?;
+
+    // calculate total principal amounts and pending rewards for all lockups
+    let mut total_principal = Uint128::zero();
+    let mut total_pending_rewards = Uint128::zero();
+
+    for item in LOCKUPS.range(deps.storage, None, None, cosmwasm_std::Order::Ascending) {
+        let (_, lockup) = item?;
+        total_principal += lockup.principal_amount.amount;
+
+        // calculate pending rewards for this lockup
+        let pending_rewards = calculate_rewards(&lockup, env.block.time, &config.denom, &config.tier_config)?;
+        total_pending_rewards += pending_rewards.amount;
+    }
+
+    // Available rewards = Total balance - Total principal amounts - Total pending rewards
+    let total_committed = total_principal + total_pending_rewards;
+    let available_rewards_amount = total_balance.amount.checked_sub(total_committed)
+        .unwrap_or(Uint128::zero()); // handle edge case where committed might exceed balance
+
+    Ok(Coin::new(available_rewards_amount, &config.denom))
+}
+
+fn query_rewards_per_year(deps: Deps, config: &Config) -> StdResult<Coin> {
+    let mut total_yearly_rewards = Uint128::zero();
+
+    // iterate through all lockups
+    // return true if sufficient funds are available, false otherwise
+    for item in LOCKUPS.range(deps.storage, None, None, cosmwasm_std::Order::Ascending) {
+        let (_, lockup) = item?;
+
+        // calculate yearly rewards for this specific lockup
+        // considering the progressive APR increases
+        let lockup_yearly_rewards = calculate_yearly_rewards_for_lockup(&lockup, &config.tier_config)?;
+
+        total_yearly_rewards += lockup_yearly_rewards;
+    }
+
+    Ok(Coin::new(total_yearly_rewards, &config.denom))
+}
+
+fn calculate_yearly_rewards_for_lockup(lockup: &Lockup, tier_config: &TierConfig) -> StdResult<Uint128> {
+    let principal_decimal = Decimal::from_atomics(lockup.principal_amount.amount, 0).unwrap();
+
+    // calculate the maximum possible APR after all increases
+    // ensuring we have sufficient reserves
+    let max_additional_percentage = tier_config.max_percentage_increase;
+    let max_apr = lockup.annual_percentage_rate + max_additional_percentage;
+    let max_yearly_rewards = principal_decimal * max_apr;
+
+    // return the maximum yearly rewards to ensure sufficient reserves
+    let reward_amount = max_yearly_rewards.atomics() / Uint128::new(10u128.pow(18));
+
+    Ok(reward_amount)
+}
+
+fn check_coin_availability(deps: Deps, env: Env ) -> StdResult<bool> {
+    let config = CONFIG.load(deps.storage)?;
+    let coin = query_available_rewards(deps, env, &config)?;
+    let required_amount = query_rewards_per_year(deps, &config)?.amount;
+
+    Ok(coin.amount >= required_amount)
 }
 
 fn calculate_rewards(

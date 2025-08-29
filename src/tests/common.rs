@@ -60,8 +60,8 @@ pub fn proper_instantiate() -> (App, Addr) {
         max_percentage_increase: Decimal::percent(10),                                   // 10% max increase
     };
 
-    let msg = InstantiateMsg {
-        admin: None,                            // use sender as admin to avoid validation issues
+    let instantiate_msg = InstantiateMsg {
+        admins: None,                            // use sender as admin to avoid validation issues
         denom: DENOM.to_string(),
         lockup_duration_seconds: 31_536_000,    // 1 year
         tier_config,
@@ -70,7 +70,7 @@ pub fn proper_instantiate() -> (App, Addr) {
         .instantiate_contract(
             contract_code_id,
             admin_addr,
-            &msg,
+            &instantiate_msg,
             &[],
             "tiered-lockup",
             None,

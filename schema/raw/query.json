@@ -69,6 +69,58 @@
         }
       },
       "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "get_deposited_rewards"
+      ],
+      "properties": {
+        "get_deposited_rewards": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "get_sum_lockups_and_deposits"
+      ],
+      "properties": {
+        "get_sum_lockups_and_deposits": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "get_all_rewards"
+      ],
+      "properties": {
+        "get_all_rewards": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "check_coin_availability"
+      ],
+      "properties": {
+        "check_coin_availability": {
+          "type": "object",
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
     }
   ]
 }

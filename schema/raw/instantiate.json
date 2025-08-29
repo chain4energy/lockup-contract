@@ -8,11 +8,14 @@
     "tier_config"
   ],
   "properties": {
-    "admin": {
+    "admins": {
       "type": [
-        "string",
+        "array",
         "null"
-      ]
+      ],
+      "items": {
+        "type": "string"
+      }
     },
     "denom": {
       "type": "string"
@@ -35,6 +38,8 @@
     "TierConfig": {
       "type": "object",
       "required": [
+        "max_percentage_increase",
+        "percentage_increase_per_year",
         "tier_1_apr",
         "tier_1_min",
         "tier_2_apr",
@@ -46,6 +51,12 @@
         "tier_4_min"
       ],
       "properties": {
+        "max_percentage_increase": {
+          "$ref": "#/definitions/Decimal"
+        },
+        "percentage_increase_per_year": {
+          "$ref": "#/definitions/Decimal"
+        },
         "tier_1_apr": {
           "$ref": "#/definitions/Decimal"
         },

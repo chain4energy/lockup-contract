@@ -261,6 +261,13 @@ fn test_deposit_with_lockup() {
     // 8. verify lockup details
     let lockup: Lockup = query_lockup(&app, &contract_addr, &user_addr);
 
+    // check if theres only one lockup after second deposit
+    let (lockup_count, _): (Uint128, Coin) = app.wrap().query_wasm_smart(
+        contract_addr.clone(),
+        &QueryMsg::GetSumLockupsAndDeposits {}
+    ).unwrap();
+
+    println!("Total lockups in contract: {}", lockup_count);
     println!("Final APR: {}", lockup.annual_percentage_rate);
 
     assert_eq!(lockup.principal_amount.amount, Uint128::new(expected_total_lock_amount));
@@ -581,6 +588,243 @@ fn test_progressive_apr_10year() {
 
     // 5. rewards should match expected rewards
    assert_eq!(rewards.amount, Uint128::new(expected_rewards));
+}
+
+#[test]
+fn test_deposit_rewards_query() {
+    let (mut app, contract_addr) = proper_instantiate();
+    let admin_addr = app.api().addr_make(ADMIN);
+    let user_addr = app.api().addr_make(USER_1);
+
+    // 1. admin deposits rewards
+    deposit_rewards(&mut app, &contract_addr, &admin_addr, 750_000 * C4E_1);
+
+    //2. query deposited rewards
+    let deposited_rewards: Coin = app.wrap().query_wasm_smart(
+        contract_addr.clone(),
+        &QueryMsg::GetDepositedRewards {}
+    ).unwrap();
+
+    println!("Deposited rewards:            {} {}", deposited_rewards.amount, deposited_rewards.denom);
+
+    // should match the deposited amount
+    assert_eq!(deposited_rewards.amount, Uint128::new(750_000 * C4E_1));
+    assert_eq!(deposited_rewards.denom, DENOM.to_string());
+
+    //3. user locks funds
+    let lock_amount = 100_000 * C4E_1;
+    lock_funds(&mut app, &contract_addr, &user_addr, lock_amount);
+
+    //4. query deposited rewards again, should remain unchanged
+    let deposited_rewards_after_lock: Coin = app.wrap().query_wasm_smart(
+        contract_addr.clone(),
+        &QueryMsg::GetDepositedRewards {}
+    ).unwrap();
+
+    // 5. advance time by half a year
+    advance_time(&mut app, 31_536_000 / 2);
+
+    // check user rewards
+    let user_rewards: Coin = query_rewards(&app, &contract_addr, &user_addr);
+
+    // expected: 100k * 5% / 2 = 2,500 C4E
+    let expected_user_rewards = lock_amount * 5 / 100 / 2;
+    assert_eq!(user_rewards.amount, Uint128::new(expected_user_rewards));
+
+    // query deposited rewards again, should now subtract pending rewards
+    let deposited_rewards_after_time: Coin = app.wrap().query_wasm_smart(
+        contract_addr.clone(),
+        &QueryMsg::GetDepositedRewards {}
+    ).unwrap();
+
+    println!("Deposited rewards after lock: {} {}", deposited_rewards_after_lock.amount, deposited_rewards_after_lock.denom);
+    println!("Deposited rewards after time: {} {}", deposited_rewards_after_time.amount, deposited_rewards_after_time.denom);
+    println!("User pending rewards:         {} {}", user_rewards.amount, user_rewards.denom);
+
+    // the rewards per year calculation always considers the highest APR for the tier so 5% base + 10% extra = 15% APR
+    // so for 100k C4E locked, the rewards per year should be 15k C4E
+    let rewards_per_year: Coin = app.wrap().query_wasm_smart(
+        contract_addr.clone(),
+        &QueryMsg::GetAllRewards {}
+    ).unwrap();
+
+    let expected_rewards_per_year = 100_000 * C4E_1 * 5 / 100;
+
+    println!("Expected rewards per year:    {}", expected_rewards_per_year);
+    println!("Rewards distributed per year: {} {}", rewards_per_year.amount, rewards_per_year.denom);
+
+    // 6. test coin availability check - should return true since we have plenty of funds
+    let is_sufficient_funds: bool = app.wrap().query_wasm_smart(
+        contract_addr.clone(),
+        &QueryMsg::CheckCoinAvailability {}
+    ).unwrap();
+
+    println!("Sufficient funds available:   {}", is_sufficient_funds);
+    assert!(is_sufficient_funds, "Should have sufficient funds for rewards");
+
+    advance_time(&mut app, 31_536_000 / 2);
+
+    let user_rewards_after_full_year: Coin = query_rewards(&app, &contract_addr, &user_addr);
+    println!("User rewards after full year: {} {}", user_rewards_after_full_year.amount, user_rewards_after_full_year.denom);
+
+    // should match the original deposited amount minus the pending rewards
+    assert_eq!(deposited_rewards_after_lock.amount, Uint128::new(750_000 * C4E_1));
+    assert_eq!(deposited_rewards_after_lock.denom, DENOM.to_string());
+
+    // available rewards should be original deposit minus pending rewards
+    let expected_available_rewards = 750_000 * C4E_1 - expected_user_rewards;
+    assert_eq!(deposited_rewards_after_time.amount, Uint128::new(expected_available_rewards));
+    assert_eq!(deposited_rewards_after_time.denom, DENOM.to_string());
+}
+
+#[test]
+fn test_coin_availability_insufficient_funds() {
+    let (mut app, contract_addr) = proper_instantiate();
+    let admin_addr = app.api().addr_make(ADMIN);
+    let user_addr = app.api().addr_make(USER_1);
+
+    // 1. admin deposits a small amount of rewards (not enough for yearly requirements)
+    let small_deposit = 1_000 * C4E_1; // Only 1k C4E
+    deposit_rewards(&mut app, &contract_addr, &admin_addr, small_deposit);
+
+    // 2. try to lock a large amount that will require more yearly rewards than deposited
+    let large_lock_amount = 500_000 * C4E_1; // 500k C4E (Tier 4: 8% APR)
+
+    // this should fail due to insufficient reward funds
+    // required yearly rewards = 500k * (8% + 10% max increase) = 500k * 18% = 90k C4E
+    // available rewards = 1k C4E (way less than required)
+    let result = app.execute_contract(
+        user_addr.clone(),
+        contract_addr.clone(),
+        &ExecuteMsg::Lock {},
+        &[coin(large_lock_amount, DENOM)],
+    );
+
+    // should fail due to insufficient reward funds
+    assert!(result.is_err(), "Lock should fail due to insufficient reward funds");
+
+    let error_msg = format!("{:?}", result.unwrap_err());
+    assert!(error_msg.contains("Insufficient reward funds"),
+            "Error should mention insufficient reward funds");
+
+    // 3. test coin availability check - should return true since no lockups exist
+    let is_sufficient_funds: bool = app.wrap().query_wasm_smart(
+        contract_addr.clone(),
+        &QueryMsg::CheckCoinAvailability {}
+    ).unwrap();
+
+    assert!(is_sufficient_funds, "Should have sufficient funds since no lockups exist");
+
+    let deposited_rewards: Coin = app.wrap().query_wasm_smart(
+        contract_addr.clone(),
+        &QueryMsg::GetDepositedRewards {}
+    ).unwrap();
+
+    let required_per_year: Coin = app.wrap().query_wasm_smart(
+        contract_addr.clone(),
+        &QueryMsg::GetAllRewards {}
+    ).unwrap();
+
+    println!("Small deposit amount:         {}", small_deposit);
+    println!("Large lock amount:            {}", large_lock_amount);
+    println!("Available rewards:            {} {}", deposited_rewards.amount, deposited_rewards.denom);
+    println!("Required per year:            {} {}", required_per_year.amount, required_per_year.denom);
+    println!("Sufficient funds available:   {}", is_sufficient_funds);
+
+    // since no lockup happened, there should be no required rewards
+    assert_eq!(deposited_rewards.amount, Uint128::new(small_deposit));
+    assert_eq!(required_per_year.amount, Uint128::zero());
+}
+
+#[test]
+fn test_get_sum_lockups_and_deposits() {
+    let (mut app, contract_addr) = proper_instantiate();
+
+    // get proper addresses
+    let admin_addr = app.api().addr_make(ADMIN);
+    let user1_addr = app.api().addr_make(USER_1);
+    let user2_addr = app.api().addr_make("user2");
+
+    // add user2 with initial balance
+    app.sudo(cw_multi_test::SudoMsg::Bank(
+        cw_multi_test::BankSudo::Mint {
+            to_address: user2_addr.to_string(),
+            amount: vec![coin(1_000_000_000_000_000u128, DENOM)],
+        },
+    )).unwrap();
+
+    // 1. admin deposits rewards
+    let rewards_deposited = 1_000_000 * C4E_1;
+    deposit_rewards(&mut app, &contract_addr, &admin_addr, rewards_deposited);
+
+    // 2. initially should have 0 lockups and 0 principal amount
+    let (lockup_count, principal_sum): (Uint128, Coin) = app.wrap().query_wasm_smart(
+        contract_addr.clone(),
+        &QueryMsg::GetSumLockupsAndDeposits {}
+    ).unwrap();
+
+    assert_eq!(lockup_count, Uint128::zero());
+    assert_eq!(principal_sum.amount, Uint128::zero()); // No principal locked yet
+    assert_eq!(principal_sum.denom, DENOM);
+
+    // 3. user1 locks 100k C4E (Tier 3)
+    let lock_amount1 = 100_000 * C4E_1;
+    lock_funds(&mut app, &contract_addr, &user1_addr, lock_amount1);
+
+    // 4. user2 locks 200k C4E (Tier 3)
+    let lock_amount2 = 200_000 * C4E_1;
+    lock_funds(&mut app, &contract_addr, &user2_addr, lock_amount2);
+
+    // 5. query after lockups
+    let (lockup_count, principal_sum): (Uint128, Coin) = app.wrap().query_wasm_smart(
+        contract_addr.clone(),
+        &QueryMsg::GetSumLockupsAndDeposits {}
+    ).unwrap();
+
+    // should have 2 lockups now
+    assert_eq!(lockup_count, Uint128::new(2));
+
+    // advance time by half a year, nothing should change in principal sum
+    advance_time(&mut app, 31_536_000 / 2);
+
+    // total principal should only be the sum of locked amounts
+    let expected_principal_total = lock_amount1 + lock_amount2;
+    assert_eq!(principal_sum.amount, Uint128::new(expected_principal_total));
+    assert_eq!(principal_sum.denom, DENOM);
+
+    println!("Lockup count: {}", lockup_count);
+    println!("Total principal locked: {}", principal_sum.amount);
+    println!("Expected principal total: {}", expected_principal_total);
+}
+
+
+#[test]
+fn test_lock_insufficient_reward_funds() {
+    let (mut app, contract_addr) = proper_instantiate();
+    let admin_addr = app.api().addr_make(ADMIN);
+    let user_addr = app.api().addr_make(USER_1);
+
+    // 1. admin deposits minimal rewards (only 1k C4E)
+    let minimal_deposit = 1_000 * C4E_1;
+    deposit_rewards(&mut app, &contract_addr, &admin_addr, minimal_deposit);
+
+    // 2. try to lock a large amount that would require more yearly rewards than available
+    let large_lock_amount = 500_000 * C4E_1; // 500k C4E (Tier 4)
+
+    // 3. attempt should fail
+    let result = app.execute_contract(
+        user_addr.clone(),
+        contract_addr.clone(),
+        &ExecuteMsg::Lock {},
+        &[coin(large_lock_amount, DENOM)],
+    );
+
+    // 4. should fail with insufficient funds error
+    assert!(result.is_err(), "Lock should fail due to insufficient reward funds");
+
+    let error_msg = format!("{:?}", result.unwrap_err());
+    assert!(error_msg.contains("Insufficient reward funds"),
+            "Error should mention insufficient reward funds");
 }
 
 

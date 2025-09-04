@@ -103,6 +103,7 @@ export CONTRACT_ADDRESS="c4e1..." # Replace with your new contract address
 ### 4.1. Deposit Rewards (Admin Only)
 
 Only an address from the `admins` list can fund the reward pool.
+This feature will be removed in the future, everyone is able to donate to the Smart Contract's balance using the bank command.
 
 ```bash
 # Deposit 1,000,000 C4E as rewards

@@ -15,7 +15,7 @@ fn test_lock_and_claim_flow() {
     let user_addr = app.api().addr_make(USER_1);
 
     // 1. admin deposits rewards
-    deposit_rewards(&mut app, &contract_addr, &admin_addr, 500_000 * C4E_1);
+    deposit_rewards(&mut app, &contract_addr, &admin_addr, 1_000_000 * C4E_1);
 
     // 2. user locks funds (Tier 4: 500k C4E -> 8% APR)
     let lock_amount = 500_000 * C4E_1;
@@ -85,7 +85,7 @@ fn test_rewards_continue_after_lockup_period() {
     let user_addr = app.api().addr_make(USER_1);
 
     // 1. admin deposits rewards
-    deposit_rewards(&mut app, &contract_addr, &admin_addr, 500_000 * C4E_1);
+    deposit_rewards(&mut app, &contract_addr, &admin_addr, 5_000_000 * C4E_1);
 
     // 2. user locks funds for 1 year (Tier 4: 500k C4E -> 8% APR)
     let lock_amount = 500_000 * C4E_1;
@@ -212,7 +212,7 @@ fn test_deposit_with_lockup() {
     let user_addr = app.api().addr_make(USER_1);
 
     // 1. admin deposits rewards
-    deposit_rewards(&mut app, &contract_addr, &admin_addr, 500_000 * C4E_1);
+    deposit_rewards(&mut app, &contract_addr, &admin_addr, 1_000_000 * C4E_1);
 
     // 2. user locks funds for 1 year
     let lock_amount = 100_000 * C4E_1;
@@ -684,7 +684,7 @@ fn test_coin_availability_insufficient_funds() {
     let user_addr = app.api().addr_make(USER_1);
 
     // 1. admin deposits a small amount of rewards (not enough for yearly requirements)
-    let small_deposit = 1_000 * C4E_1; // Only 1k C4E
+    let small_deposit = 7499 * C4E_1; // 7499 C4E deposited - should fail since 7500 C4E is needed for 500k lock at max 18% APR for a month
     deposit_rewards(&mut app, &contract_addr, &admin_addr, small_deposit);
 
     // 2. try to lock a large amount that will require more yearly rewards than deposited
@@ -827,6 +827,197 @@ fn test_lock_insufficient_reward_funds() {
             "Error should mention insufficient reward funds");
 }
 
+#[test]
+fn test_claim_rewards_after_new_deposit() {
+    let (mut app, contract_addr) = proper_instantiate();
+    let admin_addr = app.api().addr_make(ADMIN);
+    let user_addr = app.api().addr_make(USER_1);
+
+    // 1. admin deposits rewards
+    deposit_rewards(&mut app, &contract_addr, &admin_addr, 1_000_000 * C4E_1);
+
+    // 2. user starts with 10k C4E (Tier 1: 2% APR)
+    let initial_lock = 10_000 * C4E_1;
+    lock_funds(&mut app, &contract_addr, &user_addr, initial_lock);
+    println!("=== Initial Lock: {} C4E (Tier 1: 2% APR) ===", initial_lock / C4E_1);
+
+    // 3. advance time by 3 months
+    advance_time(&mut app, 31_536_000 / 4); // 3 months
+
+    // 4. user adds 40k C4E to reach 50k total (Tier 2: 3.5% APR)
+    let first_addition = 40_000 * C4E_1;
+    println!("=== After 3 months: Adding {} C4E to reach Tier 2 ===", first_addition / C4E_1);
+    lock_funds(&mut app, &contract_addr, &user_addr, first_addition);
+
+    // 5. advance time by another 3 months (6 months total)
+    advance_time(&mut app, 31_536_000 / 4); // another 3 months
+
+    // 6. user adds 50k C4E to reach 100k total (Tier 3: 5% APR)
+    let second_addition = 50_000 * C4E_1;
+    println!("=== After 6 months: Adding {} C4E to reach Tier 3 ===", second_addition / C4E_1);
+    lock_funds(&mut app, &contract_addr, &user_addr, second_addition);
+
+    // 7. advance time by another 3 months (9 months total)
+    advance_time(&mut app, 31_536_000 / 4); // another 3 months
+
+    // 8. user adds 400k C4E to reach 500k total (Tier 4: 8% APR - max tier)
+    let third_addition = 400_000 * C4E_1;
+    println!("=== After 9 months: Adding {} C4E to reach Tier 4 (Max) ===", third_addition / C4E_1);
+    lock_funds(&mut app, &contract_addr, &user_addr, third_addition);
+
+    // 9. advance time by final 3 months to complete the year
+    advance_time(&mut app, 31_536_000 / 4); // final 3 months
+
+    // 10. verify final lockup details
+    let final_lockup = query_lockup(&app, &contract_addr, &user_addr);
+    let total_amount = initial_lock + first_addition + second_addition + third_addition;
+    assert_eq!(final_lockup.principal_amount.amount, Uint128::new(total_amount));
+    assert_eq!(final_lockup.annual_percentage_rate, Decimal::percent(8)); // Tier 4 APR
+    println!("=== Final lockup: {} C4E at {}% APR ===", total_amount / C4E_1, final_lockup.annual_percentage_rate * Decimal::from_atomics(100u128, 0).unwrap());
+
+    // 11. user claims final rewards
+    claim_rewards(&mut app, &contract_addr, &user_addr);
+    let user_balance = app.wrap().query_balance(&user_addr, DENOM).unwrap();
+
+    // calculate expected rewards for each period:
+    // Period 1 (0-3 months): 10k at 2% for 3 months = 50 C4E
+    // Period 2 (3-6 months): 50k at 3.5% for 3 months = 437.5 C4E
+    // Period 3 (6-9 months): 100k at 5% for 3 months = 1250 C4E
+    // Period 4 (9-12 months): 500k at 8% for 3 months = 10000 C4E
+    let period1_rewards = initial_lock * 2 / 100 / 4;
+    let period2_rewards = (initial_lock + first_addition) * 35 / 1000 / 4;
+    let period3_rewards = (initial_lock + first_addition + second_addition) * 5 / 100 / 4;
+    let period4_rewards = total_amount * 8 / 100 / 4;
+
+    let total_expected_rewards = period1_rewards + period2_rewards + period3_rewards + period4_rewards;
+    let expected_balance = 1_000_000_000_000_000 - total_amount + total_expected_rewards;
+
+    println!("Period 1 rewards (0-3 months, 10k at 2%):     {} C4E", period1_rewards / C4E_1);
+    println!("Period 2 rewards (3-6 months, 50k at 3.5%):   {} C4E", period2_rewards / C4E_1);
+    println!("Period 3 rewards (6-9 months, 100k at 5%):    {} C4E", period3_rewards / C4E_1);
+    println!("Period 4 rewards (9-12 months, 500k at 8%):   {} C4E", period4_rewards / C4E_1);
+    println!("Total rewards earned:                         {} C4E", total_expected_rewards / C4E_1);
+    println!("User balance after claiming:                  {}", user_balance.amount);
+    println!("Expected balance:                             {}", expected_balance);
+
+    assert_eq!(user_balance.amount, Uint128::new(expected_balance));
+}
+
+#[test]
+fn test_lockup_past_period_end() {
+    let (mut app, contract_addr) = proper_instantiate();
+    let admin_addr = app.api().addr_make(ADMIN);
+    let user_addr = app.api().addr_make(USER_1);
+
+    // 1. admin deposits rewards
+    deposit_rewards(&mut app, &contract_addr, &admin_addr, 1_000_000 * C4E_1);
+
+    // 2. user locks 10k C4E (Tier 1: 2% APR)
+    let lock_amount = 10_000 * C4E_1;
+    lock_funds(&mut app, &contract_addr, &user_addr, lock_amount);
+
+    // 3. advance time by 2 years
+    advance_time(&mut app, 2 * 31_536_000); // 2 years
+
+    // 4. user tries to lock additional funds after the lockup period
+    let additional_lock = 20_000 * C4E_1;
+
+    let result = app.execute_contract(
+        user_addr.clone(),
+        contract_addr.clone(),
+        &ExecuteMsg::Lock {},
+        &[coin(additional_lock, DENOM)],
+    );
+    // should return an error
+    let error_msg = format!("{:?}", result.unwrap_err());
+    assert!(error_msg.contains("Past lockup period"),
+            "Error should mention past lockup period");
+}
+
+#[test]
+fn test_missing_reward_amount() {
+    let (mut app, contract_addr) = proper_instantiate();
+    let admin_addr = app.api().addr_make(ADMIN);
+    let user_addr = app.api().addr_make(USER_1);
+
+    // 1. admin deposits rewards
+    deposit_rewards(&mut app, &contract_addr, &admin_addr, 200_000 * C4E_1);
+
+    // 2. user locks 1M C4E (Tier 4: 8% APR)
+    let lock_amount = 1_000_000 * C4E_1;
+    lock_funds(&mut app, &contract_addr, &user_addr, lock_amount);
+
+    // 3. verify lockup details
+    let lockup: Lockup = query_lockup(&app, &contract_addr, &user_addr);
+
+    println!("Lockup details: {:?}", lockup);
+    assert_eq!(lockup.principal_amount.amount, Uint128::new(lock_amount));
+    assert_eq!(lockup.annual_percentage_rate, Decimal::percent(8));
+
+    // 4. advance time by 20 years
+    advance_time(&mut app, 20 * 31_536_000); // 20 years
+
+    // 5. query claimable rewards
+    let rewards: Coin = query_rewards(&app, &contract_addr, &user_addr);
+    println!("Claimable rewards after 20 years: {}", rewards.amount);
+
+    // 6. user tries to claim rewards
+    let result = app.execute_contract(
+        user_addr.clone(),
+        contract_addr.clone(),
+        &ExecuteMsg::ClaimRewards {},
+        &[],
+    );
+
+    // should return an error due to insufficient reward funds
+    let error_msg = format!("{:?}", result.unwrap_err());
+    println!("Error message: {}", error_msg);
+    assert!(error_msg.contains("Cannot claim rewards"),
+            "Error should mention 'Cannot claim rewards', but got: {}", error_msg);
+}
+
+
+#[test]
+fn test_missing_reward_amount_2() {
+    let (mut app, contract_addr) = proper_instantiate();
+    let admin_addr = app.api().addr_make(ADMIN);
+    let user_addr = app.api().addr_make(USER_1);
+
+    // 1. admin deposits rewards
+    deposit_rewards(&mut app, &contract_addr, &admin_addr, 200_000 * C4E_1);
+
+    // 2. user locks 1M C4E (Tier 4: 8% APR)
+    let lock_amount = 1_000_000 * C4E_1;
+    lock_funds(&mut app, &contract_addr, &user_addr, lock_amount);
+
+    // 3. verify lockup details
+    let lockup: Lockup = query_lockup(&app, &contract_addr, &user_addr);
+
+    println!("Lockup details: {:?}", lockup);
+    assert_eq!(lockup.principal_amount.amount, Uint128::new(lock_amount));
+    assert_eq!(lockup.annual_percentage_rate, Decimal::percent(8));
+
+    // 4. advance time by 20 years
+    advance_time(&mut app, 20 * 31_536_000); // 20 years
+
+    // 5. query claimable rewards
+    let rewards: Coin = query_rewards(&app, &contract_addr, &user_addr);
+    println!("Claimable rewards after 20 years: {}", rewards.amount);
+
+    // 6. user tries to unlock principal
+    let result = app.execute_contract(
+        user_addr.clone(),
+        contract_addr.clone(),
+        &ExecuteMsg::UnlockPrincipal {},
+        &[],
+    );
+
+    // should return an error due to insufficient reward funds
+    let error_msg = format!("{:?}", result.unwrap_err());
+    println!("Error message: {}", error_msg);
+    assert!(error_msg.contains("Cannot claim rewards"),
+            "Error should mention 'Cannot claim rewards', but got: {}", error_msg);
+}
 
 // helper functions
 fn deposit_rewards(app: &mut App, contract_addr: &Addr, admin_addr: &Addr, amount: u128) {

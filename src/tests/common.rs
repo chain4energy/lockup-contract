@@ -37,7 +37,7 @@ pub fn proper_instantiate() -> (App, Addr) {
             .init_balance(
                 storage,
                 &admin_addr,
-                vec![Coin::new(1_000_000_000_000u128, DENOM)],
+                vec![Coin::new(1_000_000_000_000_000_000u128, DENOM)],
             )
             .unwrap();
     });

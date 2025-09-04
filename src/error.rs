@@ -1,4 +1,4 @@
-use cosmwasm_std::{StdError, Timestamp};
+use cosmwasm_std::{Uint128, StdError, Timestamp};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -8,12 +8,6 @@ pub enum ContractError {
 
     #[error("Unauthorized")]
     Unauthorized {},
-
-    #[error("Funds are still locked. Unlock time: {unlock_time}")]
-    StillLocked { unlock_time: Timestamp },
-
-    #[error("Must send funds with the expected denomination: {expected_denom}")]
-    InvalidFunds { expected_denom: String },
 
     #[error("Amount cannot be zero")]
     ZeroAmount {},
@@ -29,4 +23,38 @@ pub enum ContractError {
 
     #[error("Past lockup period")]
     PastLockupPeriod {},
+
+    #[error("No funds for deposit")]
+    NoFundsForDeposit {},
+
+    #[error("Invalid principal amount")]
+    InvalidPrincipalAmount {},
+
+    #[error("Funds are still locked. Unlock time: {unlock_time}")]
+    StillLocked { unlock_time: Timestamp },
+
+    #[error("Must send funds with the expected denomination: {expected_denom}")]
+    InvalidFunds { expected_denom: String },
+
+    #[error("Cannot claim rewards: to claim {} {}, available {} {}, please contact administrators.",
+        claim_amount, claim_denom,
+        available_amount, available_denom)]
+
+    CannotClaimRewards {
+        claim_amount:     Uint128,
+        claim_denom:      String,
+        available_amount: Uint128,
+        available_denom:  String,
+    },
+
+    #[error("Insufficient reward funds: available {} {}, required {} {}",
+        available_amount, available_denom,
+        required_amount, required_denom)]
+
+    InsufficientRewardFunds {
+        available_amount: u128,
+        available_denom:  String,
+        required_amount:  u128,
+        required_denom:   String,
+    },
 }

@@ -41,7 +41,7 @@ mod tests {
                     &MockApi::default().addr_make(ADMIN),
                     vec![Coin {
                         denom: NATIVE_DENOM.to_string(),
-                        amount: Uint128::new(1_000_000_000_000u128),
+                        amount: Uint128::new(1_000_000_000_000_000_000_000_000u128),
                     }],
                 )
                 .unwrap();
